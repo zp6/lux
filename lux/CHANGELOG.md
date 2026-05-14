@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0] - 2025-05-15
+
+### Added
+- Mira Network integration for multi-agent collaboration
+- NFT marketplace data aggregation module with multi-chain support
+- Web3 authentication framework (EIP-4361 SIWE) for wallet-based login
+- Gas optimization module for transaction cost management
+- Smart contract event monitoring system
+- Cargo package management integration for Rust tooling
+- Rust core integration with NIF bindings
+- Rust type system and serialization helpers
+- Rust testing framework integration
+- Telegram Analytics & Monitoring prisms
+- Discord integration prisms (guilds, members, roles)
+- Ollama local model support for self-hosted LLM inference
+- Node.js support improvements and testing infrastructure
+- Perplexity AI integration with prisms and tests
+
+### Changed
+- Enhanced CI workflows with comprehensive caching (Python, Dialyzer, Node.js)
+- Improved multi-language support (Elixir, Python, Node.js, Rust)
+
 ## [0.4.0] - 2025-02-20
 
 ### Added
@@ -59,4 +83,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic collaboration protocols
 - Agent discovery and capability advertisement
 - Status tracking for agents
-- Integration with OpenAI's GPT models 
+- Integration with OpenAI's GPT models
