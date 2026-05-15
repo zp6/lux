@@ -19,31 +19,6 @@ defmodule Lux.Integrations.Binance.Client do
 
   @doc """
   Makes a request to the Binance REST API.
-
-  ## Parameters
-
-    * `method` - HTTP method (:get, :post, :put, :delete)
-    * `path` - API endpoint path (e.g., "/api/v3/order")
-    * `opts` - Request options
-
-  ## Options
-
-    * `:signed` - Whether to sign the request (default: false)
-    * `:params` - Query parameters or request body
-    * `:base_url` - Override base URL (for futures etc.)
-
-  ## Examples
-
-      # Get server time
-      iex> Client.request(:get, "/api/v3/time")
-      {:ok, %{"serverTime" => 1234567890123}}
-
-      # Place a signed order
-      iex> Client.request(:post, "/api/v3/order", %{
-      ...>   signed: true,
-      ...>   params: %{symbol: "BTCUSDT", side: "BUY", type: "LIMIT", ...}
-      ...> })
-      {:ok, %{"symbol" => "BTCUSDT", "orderId" => 12345}}
   """
   @spec request(atom(), String.t(), request_opts()) :: {:ok, map()} | {:error, term()}
   def request(method, path, opts \\ %{}) do

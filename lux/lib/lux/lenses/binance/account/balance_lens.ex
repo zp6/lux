@@ -3,7 +3,6 @@ defmodule Lux.Lenses.Binance.Account.BalanceLens do
   A lens for fetching account balances from Binance.
 
   Requires authenticated API keys with read permissions.
-  Returns all asset balances, filtering out zero balances by default.
 
   ## Examples
 
@@ -23,27 +22,19 @@ defmodule Lux.Lenses.Binance.Account.BalanceLens do
     schema: %{
       type: :object,
       properties: %{
-        include_zero: %{
-          type: :boolean,
-          description: "Include assets with zero balance (default: false)",
-          default: false
-        }
+        include_zero: %{type: :boolean, description: "Include zero-balance assets", default: false}
       }
     }
-
-  alias Lux.Integrations.Binance
 
   def before_focus(params) do
     Map.put(params, :timestamp, System.system_time(:millisecond))
   end
 
-  def after_focus(%{"balances" => balances} = body) do
-    include_zero = get_in(body, ["include_zero"]) || false
-
+  def after_focus(%{"balances" => balances}) do
     filtered_balances =
       balances
       |> Enum.filter(fn b ->
-        include_zero or String.to_float(b["free"]) > 0.0 or String.to_float(b["locked"]) > 0.0
+        String.to_float(b["free"]) > 0.0 or String.to_float(b["locked"]) > 0.0
       end)
       |> Enum.map(fn %{"asset" => asset, "free" => free, "locked" => locked} ->
         %{
@@ -56,8 +47,7 @@ defmodule Lux.Lenses.Binance.Account.BalanceLens do
 
     {:ok, %{
       total_assets: length(filtered_balances),
-      balances: filtered_balances,
-      raw_data: body
+      balances: filtered_balances
     }}
   end
 

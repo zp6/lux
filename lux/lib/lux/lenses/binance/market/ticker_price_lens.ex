@@ -23,7 +23,7 @@ defmodule Lux.Lenses.Binance.Market.TickerPriceLens do
       }
     }
 
-  def after_focus(%{"symbol" => symbol, "price" => _price} = body) do
+  def after_focus(%{"symbol" => _symbol, "price" => _price} = body) do
     {:ok, %{
       symbol: body["symbol"],
       price: String.to_float(body["price"]),

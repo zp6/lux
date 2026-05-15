@@ -16,16 +16,8 @@ defmodule Lux.Lenses.Binance.Market.OrderBookLens do
     schema: %{
       type: :object,
       properties: %{
-        symbol: %{
-          type: :string,
-          description: "Trading pair symbol (e.g., 'BTCUSDT')"
-        },
-        limit: %{
-          type: :integer,
-          description: "Number of entries (5, 10, 20, 50, 100, 500, 1000, 5000)",
-          enum: [5, 10, 20, 50, 100, 500, 1000, 5000],
-          default: 100
-        }
+        symbol: %{type: :string, description: "Trading pair symbol"},
+        limit: %{type: :integer, description: "Depth entries (5,10,20,50,100,500,1000,5000)", enum: [5, 10, 20, 50, 100, 500, 1000, 5000], default: 100}
       },
       required: ["symbol"]
     }
@@ -45,10 +37,6 @@ defmodule Lux.Lenses.Binance.Market.OrderBookLens do
     Enum.map(orders, fn [price, qty] ->
       %{price: String.to_float(price), quantity: String.to_float(qty)}
     end)
-  end
-
-  defp calculate_spread([["best_bid_price", _] | _], [["best_ask_price", _] | _]) do
-    0.0
   end
 
   defp calculate_spread([[bid_price, _] | _], [[ask_price, _] | _]) do

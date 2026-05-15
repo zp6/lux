@@ -96,20 +96,6 @@ defmodule Lux.Integrations.Binance do
     |> Keyword.get(:rate_limit_ms, 100)
   end
 
-  @doc """
-  Parses a Binance API error response into a structured error tuple.
-  """
-  @spec parse_error(map()) :: {:error, term()}
-  def parse_error(%{"code" => code, "msg" => msg}) do
-    {:error, {code, msg}}
-  end
-
-  def parse_error(%{"message" => msg}) do
-    {:error, msg}
-  end
-
-  def parse_error(error), do: {:error, error}
-
   defp api_key do
     Application.fetch_env!(:lux, :api_keys)
     |> Keyword.get(:binance_api_key)
