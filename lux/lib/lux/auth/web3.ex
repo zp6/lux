@@ -3,11 +3,17 @@ defmodule Lux.Auth.Web3 do
   Web3 Authentication module implementing Sign-In with Ethereum (EIP-4361).
 
   Provides SIWE message construction, nonce management, and authentication
-  flows for verifying Ethereum wallet ownership.
+  flows for verifying Ethereum wallet ownership. Supports both single-sig
+  and multi-sig authentication, token-gated access, and domain allowlists.
+
+  ## Configuration
+
+      config :lux, :siwe_domain_allowlist, ["example.com", "app.example.com"]
+      config :lux, :eth_rpc_url, "https://eth.llamarpc.com"
+      config :lux, :web3_auth_signing_key, "your-hmac-secret"
 
   ## Example
 
-      # Generate a nonce and build a SIWE message
       {:ok, nonce} = Lux.Auth.Web3.generate_nonce()
       message = Lux.Auth.Web3.build_siwe_message(%{
         domain: "example.com",
@@ -16,14 +22,14 @@ defmodule Lux.Auth.Web3 do
         nonce: nonce,
         chain_id: 1
       })
-
-      # Verify a signed message
       {:ok, session} = Lux.Auth.Web3.authenticate(message, signature)
   """
 
   alias Lux.Auth.Web3.Signature
   alias Lux.Auth.Web3.Session
   alias Lux.Auth.Web3.Audit
+  alias Lux.Auth.Web3.MultiSig
+  alias Lux.Auth.Web3.TokenGate
 
   @type siwe_params :: %{
           domain: String.t(),
@@ -41,11 +47,6 @@ defmodule Lux.Auth.Web3 do
   @nonce_bytes 16
   @nonce_ttl_seconds 300
 
-  @doc """
-  Generates a cryptographically random nonce for SIWE authentication.
-
-  The nonce is stored in an ETS-backed cache with a TTL of #{@nonce_ttl_seconds} seconds.
-  """
   @spec generate_nonce() :: {:ok, String.t()}
   def generate_nonce do
     ensure_nonce_table()
@@ -55,10 +56,6 @@ defmodule Lux.Auth.Web3 do
     {:ok, nonce}
   end
 
-  @doc """
-  Validates that a nonce exists and has not expired.
-  Removes the nonce after validation (single-use).
-  """
   @spec validate_nonce(String.t()) :: :ok | {:error, :invalid_nonce}
   def validate_nonce(nonce) do
     ensure_nonce_table()
@@ -80,24 +77,32 @@ defmodule Lux.Auth.Web3 do
   end
 
   @doc """
-  Builds a SIWE (EIP-4361) message string from the given parameters.
+  Validates that a domain is in the configured allowlist.
 
-  ## Required fields
+      config :lux, :siwe_domain_allowlist, ["example.com", "app.example.com"]
 
-    * `:domain` - The domain requesting the sign-in
-    * `:address` - The Ethereum address performing the sign-in
-    * `:statement` - Human-readable statement to sign
-    * `:nonce` - Random nonce for replay protection
-    * `:chain_id` - The chain ID of the network
-
-  ## Optional fields
-
-    * `:issued_at` - ISO 8601 datetime (defaults to current time)
-    * `:expiration_time` - ISO 8601 datetime
-    * `:not_before` - ISO 8601 datetime
-    * `:request_id` - System-specific request identifier
-    * `:resources` - List of resource URIs
+  If no allowlist is configured, all domains are accepted (backwards compatible).
   """
+  @spec validate_domain(String.t()) :: :ok | {:error, :domain_not_allowed}
+  def validate_domain(domain) do
+    case Application.get_env(:lux, :siwe_domain_allowlist) do
+      nil ->
+        :ok
+
+      allowlist when is_list(allowlist) ->
+        normalized = String.downcase(domain)
+
+        if normalized in Enum.map(allowlist, &String.downcase/1) do
+          :ok
+        else
+          {:error, :domain_not_allowed}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   @spec build_siwe_message(siwe_params()) :: String.t()
   def build_siwe_message(params) do
     issued_at = params[:issued_at] || DateTime.utc_now() |> DateTime.to_iso8601()
@@ -106,9 +111,9 @@ defmodule Lux.Auth.Web3 do
     lines = [
       "#{params.domain} wants you to sign in with your Ethereum account:",
       address,
-      "", # blank line
+      "",
       params.statement,
-      "", # blank line
+      "",
       "URI: https://#{params.domain}",
       "Version: 1",
       "Chain ID: #{params.chain_id}",
@@ -128,17 +133,17 @@ defmodule Lux.Auth.Web3 do
   Authenticates a user by verifying a signed SIWE message.
 
   1. Parses the SIWE message to extract fields
-  2. Validates the nonce
-  3. Recovers the signer address from the signature
-  4. Verifies the recovered address matches the message address
-  5. Creates a session if all checks pass
-  6. Logs the authentication event
-
-  Returns `{:ok, session}` on success or `{:error, reason}` on failure.
+  2. Validates the domain against the configured allowlist
+  3. Validates the nonce
+  4. Recovers the signer address from the signature
+  5. Verifies the recovered address matches the message address
+  6. Creates a session if all checks pass
+  7. Logs the authentication event
   """
   @spec authenticate(String.t(), binary()) :: {:ok, Session.t()} | {:error, term()}
   def authenticate(message, signature) do
     with {:ok, params} <- parse_siwe_message(message),
+         :ok <- validate_domain(params.domain),
          :ok <- validate_nonce(params.nonce),
          :ok <- validate_expiration(params),
          :ok <- validate_not_before(params),
@@ -172,8 +177,22 @@ defmodule Lux.Auth.Web3 do
   end
 
   @doc """
-  Validates an existing session token.
+  Authenticates a user via multi-signature verification.
   """
+  @spec authenticate_multisig(String.t(), [map()], pos_integer(), keyword()) ::
+          {:ok, Session.t()} | {:error, term()}
+  def authenticate_multisig(message, signatures, threshold, opts \\ []) do
+    MultiSig.authenticate(message, signatures, threshold, opts)
+  end
+
+  @doc """
+  Checks token-gated access for an address.
+  """
+  @spec check_token_gate(String.t(), map()) :: :ok | {:error, term()}
+  def check_token_gate(address, gate_spec) do
+    TokenGate.check(address, gate_spec)
+  end
+
   @spec validate_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def validate_session(token) do
     Session.validate(token)
@@ -184,12 +203,16 @@ defmodule Lux.Auth.Web3 do
   """
   @spec refresh_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def refresh_session(token) do
-    Session.refresh(token)
+    case Session.refresh(token) do
+      {:ok, _new_session} = result ->
+        Audit.log_event(:session_refreshed, %{token_prefix: String.slice(token, 0, 8)})
+        result
+
+      {:error, _} = error ->
+        error
+    end
   end
 
-  @doc """
-  Revokes a session token.
-  """
   @spec revoke_session(String.t()) :: :ok
   def revoke_session(token) do
     Audit.log_event(:session_revoked, %{token_prefix: String.slice(token, 0, 8)})
@@ -271,9 +294,6 @@ defmodule Lux.Auth.Web3 do
     end
   end
 
-  @doc """
-  Parses a SIWE message string into a structured map.
-  """
   @spec parse_siwe_message(String.t()) :: {:ok, map()} | {:error, :invalid_message}
   def parse_siwe_message(message) do
     lines = String.split(message, "\n")

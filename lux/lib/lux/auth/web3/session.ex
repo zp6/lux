@@ -6,10 +6,31 @@ defmodule Lux.Auth.Web3.Session do
   Tokens carry the Ethereum address, chain ID, and expiry information.
 
   Sessions are tracked in an ETS table for revocation support.
+
+  ## Session Lifecycle
+
+    1. **Create** - Generate a signed token with claims and store in ETS
+    2. **Validate** - Check signature, expiry, and revocation status
+    3. **Refresh** - Issue a new token with extended expiry (old token revoked)
+    4. **Revoke** - Remove session from ETS, token becomes invalid immediately
+
+  ## Expiry & Refresh
+
+    * Default TTL: 8 hours (28800 seconds)
+    * Refresh is available for any valid (non-expired, non-revoked) session
+    * Expired sessions should be cleaned up periodically via `cleanup_expired/0`
+
+  ## Persistence
+
+    Sessions are stored in ETS for the lifetime of the BEAM VM. For
+    distributed systems, consider backing with a persistent store (Redis,
+    DETS, or database) via a custom `session_store` module configured in
+    application env:
+
+        config :lux, :session_store, MyCustomSessionStore
   """
 
   @default_ttl_seconds 3600 * 8
-  @refresh_threshold_seconds 1800
 
   @type t :: %__MODULE__{
           token: String.t(),
@@ -95,16 +116,19 @@ defmodule Lux.Auth.Web3.Session do
   @doc """
   Refreshes a valid session, extending its expiry.
 
-  Only refreshes if the session is still valid and within the refresh threshold.
+  Only refreshes if the session is still valid (not expired, not revoked).
+  The old token is revoked and a new token is issued with the same claims
+  but a fresh expiry window.
+
+  Returns `{:error, :session_expired}` if the session has expired.
+  Returns `{:error, :session_revoked}` if the session was already revoked.
   """
   @spec refresh(String.t()) :: {:ok, t()} | {:error, term()}
   def refresh(token) do
     case validate(token) do
       {:ok, session} ->
-        # Revoke the old session
         revoke_by_jti(extract_jti(token))
 
-        # Create a new session with the same claims
         create(%{
           address: session.address,
           chain_id: session.chain_id,
@@ -118,14 +142,49 @@ defmodule Lux.Auth.Web3.Session do
 
   @doc """
   Revokes a session token.
+
+  Removes the session from the ETS store, making the token immediately invalid.
   """
   @spec revoke(String.t()) :: :ok
   def revoke(token) do
     ensure_session_table()
+
     case extract_jti(token) do
       nil -> :ok
       jti -> revoke_by_jti(jti)
     end
+  end
+
+  @doc """
+  Cleans up expired sessions from the ETS store.
+
+  Should be called periodically (e.g., every hour) to prevent
+  unbounded growth of the session table. Returns the number
+  of sessions cleaned up.
+  """
+  @spec cleanup_expired() :: non_neg_integer()
+  def cleanup_expired do
+    ensure_session_table()
+    now = System.system_time(:second)
+
+    expired =
+      :ets.tab2list(:web3_sessions)
+      |> Enum.filter(fn {_jti, expires_at, _session} -> expires_at <= now end)
+
+    Enum.each(expired, fn {jti, _, _} -> :ets.delete(:web3_sessions, jti) end)
+    length(expired)
+  end
+
+  @doc """
+  Returns the number of active (non-expired) sessions.
+  """
+  @spec active_count() :: non_neg_integer()
+  def active_count do
+    ensure_session_table()
+    now = System.system_time(:second)
+
+    :ets.tab2list(:web3_sessions)
+    |> Enum.count(fn {_jti, expires_at, _session} -> expires_at > now end)
   end
 
   # --- Token Encoding/Decoding ---
@@ -166,7 +225,6 @@ defmodule Lux.Auth.Web3.Session do
   defp signing_key do
     case Application.get_env(:lux, :web3_auth_signing_key) do
       nil ->
-        # Generate a persistent key from the application secret or derive one
         :crypto.hash(:sha256, "lux_web3_auth_default_key")
 
       key when is_binary(key) ->
