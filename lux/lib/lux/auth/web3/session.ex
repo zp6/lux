@@ -167,12 +167,12 @@ defmodule Lux.Auth.Web3.Session do
     ensure_session_table()
     now = System.system_time(:second)
 
-    expired =
-      :ets.tab2list(:web3_sessions)
-      |> Enum.filter(fn {_jti, expires_at, _session} -> expires_at <= now end)
-
-    Enum.each(expired, fn {jti, _, _} -> :ets.delete(:web3_sessions, jti) end)
-    length(expired)
+    # Use :ets.select_delete/2 for single-pass O(n) deletion
+    # instead of tab2list + filter + individual deletes.
+    :ets.select_delete(
+      :web3_sessions,
+      [{{:\"$1\", :\"$2\", :\"$3\"}, [{:\"=<\", :\"$2\", now}], [true]}]
+    )
   end
 
   @doc """
@@ -183,8 +183,12 @@ defmodule Lux.Auth.Web3.Session do
     ensure_session_table()
     now = System.system_time(:second)
 
-    :ets.tab2list(:web3_sessions)
-    |> Enum.count(fn {_jti, expires_at, _session} -> expires_at > now end)
+    # Use :ets.select_count/2 for single-pass count
+    # instead of materializing the entire table with tab2list.
+    :ets.select_count(
+      :web3_sessions,
+      [{{:\"$1\", :\"$2\", :\"$3\"}, [{:>, :\"$2\", now}], [true]}]
+    )
   end
 
   # --- Token Encoding/Decoding ---

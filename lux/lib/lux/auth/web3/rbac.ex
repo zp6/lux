@@ -209,7 +209,12 @@ defmodule Lux.Auth.Web3.RBAC do
     ensure_rbac_table()
 
     try do
-      :ets.match_delete(:web3_rbac_gates, {{:gate, normalized, :_}, :_})
+      # :ets.match_delete treats :_ as atom literal, not wildcard.
+      # Use :ets.select_delete with match spec that binds the address portion.
+      :ets.select_delete(
+        :web3_rbac_gates,
+        [{{:{:gate, :"$1", :"$2"}, :"$3"}, [{:==, :"$1", normalized}], [true]}]
+      )
     rescue
       ArgumentError -> :ok
     end

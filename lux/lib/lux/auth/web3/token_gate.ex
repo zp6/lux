@@ -258,8 +258,10 @@ defmodule Lux.Auth.Web3.TokenGate do
     Base.decode16!(padded, case: :lower)
   end
 
+  # Integer division avoids floating-point precision issues (e.g., 0.1 + 0.2 != 0.3).
+  # Returns the whole number of tokens (floor division).
   defp normalize_balance(raw_balance, decimals) do
-    raw_balance / :math.pow(10, decimals)
+    div(raw_balance, Integer.pow(10, decimals))
   end
 
   defp get_rpc_url do

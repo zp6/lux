@@ -53,7 +53,8 @@ defmodule Lux.Auth.Web3.MultiSig do
         {:error, :duplicate_signer}
 
       true ->
-        verified = verify_signatures(message, signatures)
+        with :ok <- validate_siwe_message(message, opts) do
+          verified = verify_signatures(message, signatures)
         valid_count = length(verified)
 
         if valid_count >= threshold do
@@ -84,6 +85,7 @@ defmodule Lux.Auth.Web3.MultiSig do
 
           {:error, :threshold_not_met}
         end
+      end
     end
   end
 
@@ -123,6 +125,66 @@ defmodule Lux.Auth.Web3.MultiSig do
     |> verify_signatures()
     |> length()
   end
+
+  # --- SIWE Message Validation ---
+
+  defp validate_siwe_message(message, opts) do
+    with {:ok, parsed} <- parse_siwe_message(message) do
+      nonce = Keyword.get(opts, :expected_nonce)
+      domain = Keyword.get(opts, :domain)
+
+      with :ok <- validate_nonce(parsed, nonce),
+           :ok <- validate_domain(parsed, domain),
+           :ok <- validate_expiration(parsed) do
+        :ok
+      end
+    end
+  end
+
+  defp parse_siwe_message(message) when is_binary(message) do
+    lines = String.split(message, "\n")
+
+    fields =
+      lines
+      |> Enum.map(&String.trim/1)
+      |> Enum.reduce(%{}, fn line, acc ->
+        case String.split(line, ":", parts: 2) do
+          [key, value] -> Map.put(acc, String.downcase(key), String.trim(value))
+          _ -> acc
+        end
+      end)
+
+    # Extract domain from first line (e.g., "example.com wants you to sign in")
+    domain =
+      case lines |> List.first() |> String.trim() |> String.split(" ", parts: 2) do
+        [d | _] -> d
+        _ -> nil
+      end
+
+    {:ok, Map.put(fields, "domain", domain)}
+  rescue
+    _ -> {:error, :invalid_siwe_message}
+  end
+
+  defp validate_nonce(_parsed, nil), do: :ok
+  defp validate_nonce(%{"nonce" => nonce}, expected) when nonce == expected, do: :ok
+  defp validate_nonce(_, _), do: {:error, :invalid_nonce}
+
+  defp validate_domain(_parsed, nil), do: :ok
+  defp validate_domain(%{"domain" => domain}, expected) when domain == expected, do: :ok
+  defp validate_domain(_, _), do: {:error, :domain_mismatch}
+
+  defp validate_expiration(%{"expiration-time" => expiration}) when is_binary(expiration) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, exp_dt, _} ->
+        if DateTime.compare(DateTime.utc_now(), exp_dt) == :lt, do: :ok, else: {:error, :message_expired}
+
+      _ ->
+        {:error, :invalid_expiration_format}
+    end
+  end
+
+  defp validate_expiration(_), do: :ok
 
   # --- Private Helpers ---
 
