@@ -11,15 +11,10 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
   ## Configuration
 
       config :lux, Lux.Web3.GasOptimizer.Estimator,
-        # Default safety margin percentage (10%)
         default_margin_percent: 10,
-        # Maximum allowed margin (50%)
         max_margin_percent: 50,
-        # Anomaly threshold: flag if estimate exceeds this multiple of historical average
         anomaly_threshold: 2.0,
-        # Minimum gas limit for any transaction
         min_gas_limit: 21_000,
-        # Maximum gas limit cap
         max_gas_limit: 10_000_000
 
   ## Usage
@@ -86,9 +81,11 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
 
     case rpc_estimate(chain, tx_params) do
       {:ok, raw_estimate} ->
+        # apply_margin/4 returns an integer (gas_limit with margin applied)
+        gas_with_margin = apply_margin(raw_estimate, margin_percent, min_gas, max_gas)
+        # check_anomaly/4 now accepts an integer, returns {gas_limit, anomaly}
         {gas_limit, anomaly} =
-          apply_margin(raw_estimate, margin_percent, min_gas, max_gas)
-          |> check_anomaly(chain, tx_params[:to], extract_method_id(tx_params[:data]))
+          check_anomaly(gas_with_margin, chain, tx_params[:to], extract_method_id(tx_params[:data]))
 
         meta = %{
           source: :rpc,
@@ -106,9 +103,8 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
 
         case historical_estimate(chain, contract, method) do
           {:ok, raw_estimate} ->
-            {gas_limit, anomaly} =
-              apply_margin(raw_estimate, margin_percent * 2, min_gas, max_gas)
-              |> check_anomaly(chain, contract, method)
+            gas_with_margin = apply_margin(raw_estimate, margin_percent * 2, min_gas, max_gas)
+            {gas_limit, anomaly} = check_anomaly(gas_with_margin, chain, contract, method)
 
             meta = %{
               source: :cached,
@@ -138,10 +134,6 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
 
   Stores the value in an ETS-backed history table for future reference.
   Keeps only the last 100 entries per {chain, contract, method} key.
-
-  ## Examples
-
-      :ok = Estimator.record_usage(:ethereum, "0xContract", "transfer", 55_000)
   """
   @spec record_usage(atom(), contract_address(), method_id(), gas_limit()) :: :ok
   def record_usage(chain, contract, method, gas_used) do
@@ -154,7 +146,6 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
         [] -> []
       end
 
-    # Keep last 100 entries
     updated =
       [gas_used | existing]
       |> Enum.take(100)
@@ -170,11 +161,6 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
 
     * `{:ok, %{avg: float, min: integer, max: integer, count: integer}}`
     * `:error` if no history exists
-
-  ## Examples
-
-      {:ok, stats} = Estimator.get_history(:ethereum, "0xContract", "transfer")
-      # => %{avg: 55230.5, min: 51000, max: 65000, count: 20}
   """
   @spec get_history(atom(), contract_address(), method_id()) :: {:ok, map()} | :error
   def get_history(chain, contract, method) do
@@ -275,7 +261,6 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
   defp historical_estimate(chain, contract, method) do
     case get_history(chain, contract, method) do
       {:ok, %{avg: avg, max: max_val}} ->
-        # Use the higher of average or max, with a small buffer
         {:ok, max(trunc(avg), max_val)}
 
       :error ->
@@ -283,6 +268,7 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
     end
   end
 
+  # Returns an integer (gas_limit with margin applied, clamped to [min_gas, max_gas])
   defp apply_margin(raw, margin_percent, min_gas, max_gas) do
     raw
     |> Kernel.*(1 + margin_percent / 100)
@@ -291,7 +277,9 @@ defmodule Lux.Web3.GasOptimizer.Estimator do
     |> min(max_gas)
   end
 
-  defp check_anomaly({gas_limit, _} = result, chain, contract, method) do
+  # Accepts an integer gas_limit, returns {gas_limit, anomaly_flag}
+  # FIX: previously pattern-matched {gas_limit, _} which crashed because apply_margin returns integer
+  defp check_anomaly(gas_limit, chain, contract, method) do
     threshold = anomaly_threshold()
 
     case get_history(chain, contract, method) do

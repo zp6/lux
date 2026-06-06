@@ -1,6 +1,6 @@
 defmodule Lux.Web3.GasOptimizer do
   @moduledoc """
-  Gas optimization module for EVM-compatible chains.
+  Gas optimization module for EVM-compatible chains and non-EVM chains.
 
   Provides real-time gas price monitoring (EIP-1559 base fee + priority fee),
   gas price prediction based on historical trends, transaction batching, and
@@ -14,6 +14,8 @@ defmodule Lux.Web3.GasOptimizer do
   | Polygon   | 137      | EIP-1559   |
   | BSC       | 56       | Legacy     |
   | Arbitrum  | 42161    | EIP-1559   |
+  | Solana    | -        | Non-EVM    |
+  | Near      | -        | Non-EVM    |
 
   ## Configuration
 
@@ -27,13 +29,9 @@ defmodule Lux.Web3.GasOptimizer do
           arbitrum: System.get_env("ARBITRUM_RPC_URL") || "https://arb1.arbitrum.io/rpc"
         },
         default_chain: :ethereum,
-        # Gas price multiplier for safety margin (1.0 = no margin)
         gas_price_margin: 1.1,
-        # Default priority fee in wei
         default_priority_fee: 1_500_000_000,
-        # Max gas price cap in wei (50 Gwei)
         max_gas_price: 50_000_000_000,
-        # History window in blocks for trend analysis
         history_window: 100
 
   ## Usage
@@ -47,18 +45,32 @@ defmodule Lux.Web3.GasOptimizer do
       {:ok, suggestion} = GasOptimizer.suggest_gas_price(:ethereum, :medium)
 
       # Estimate gas for a transaction
-      {:ok, gas_limit} = GasOptimizer.estimate_gas(:ethereum, tx_params)
+      {:ok, {gas_limit, meta}} = GasOptimizer.estimate_gas(:ethereum, tx_params)
 
       # Get the best time to send a transaction
       {:ok, prediction} = GasOptimizer.predict_optimal_time(:ethereum)
+
+      # Replace a stuck transaction with higher fees
+      {:ok, replacement} = GasOptimizer.replace_transaction(stuck_tx, :eip1559)
+
+      # Get base fee history for EIP-1559 fee estimation
+      {:ok, history} = GasOptimizer.base_fee_history(:ethereum)
+
+      # Get gas prices from multi-source oracle
+      {:ok, prices} = GasOptimizer.oracle_gas_prices(:ethereum)
+
+      # Optimize a transaction (estimate + suggest fees)
+      {:ok, gas_estimate} = GasOptimizer.optimize(:ethereum, tx_params)
   """
 
   alias Lux.Web3.GasOptimizer.Estimator
   alias Lux.Web3.GasOptimizer.Predictor
+  alias Lux.Web3.GasOptimizer.Replacement
+  alias Lux.Web3.GasOptimizer.FeeOracle
 
   require Logger
 
-  @type chain :: :ethereum | :polygon | :bsc | :arbitrum
+  @type chain :: :ethereum | :polygon | :bsc | :arbitrum | :solana | :near | :sui | :aptos
   @type speed :: :slow | :medium | :fast | :instant
   @type wei :: non_neg_integer()
   @type gas_prices :: %{
@@ -78,6 +90,7 @@ defmodule Lux.Web3.GasOptimizer do
 
   @eip1559_chains [:ethereum, :polygon, :arbitrum]
   @legacy_chains [:bsc]
+  @non_evm_chains [:solana, :near, :sui, :aptos]
 
   # Speed multipliers for priority fee
   @speed_multipliers %{
@@ -110,6 +123,18 @@ defmodule Lux.Web3.GasOptimizer do
   def eip1559?(chain), do: chain in @eip1559_chains
 
   @doc """
+  Checks whether a chain is a known legacy (non-EIP-1559 EVM) chain.
+  """
+  @spec known_legacy?(atom()) :: boolean()
+  def known_legacy?(chain), do: chain in @legacy_chains
+
+  @doc """
+  Checks whether a chain is a known non-EVM chain.
+  """
+  @spec non_evm?(atom()) :: boolean()
+  def non_evm?(chain), do: chain in @non_evm_chains
+
+  @doc """
   Gets the RPC URL for a given chain.
   """
   @spec rpc_url(chain()) :: String.t()
@@ -138,21 +163,21 @@ defmodule Lux.Web3.GasOptimizer do
 
   For EIP-1559 chains, returns base fee, priority fee, and max fee.
   For legacy chains (BSC), returns a single gas price.
+  For non-EVM chains, returns a chain-specific gas price estimate.
 
   ## Examples
 
       {:ok, prices} = GasOptimizer.get_gas_prices(:ethereum)
-      # => %{base_fee: 15_000_000_000, priority_fee: 1_500_000_000, ...}
-
       {:ok, prices} = GasOptimizer.get_gas_prices(:bsc)
-      # => %{gas_price: 3_000_000_000, ...}
+      {:ok, prices} = GasOptimizer.get_gas_prices(:solana)
   """
   @spec get_gas_prices(chain()) :: {:ok, map()} | {:error, term()}
   def get_gas_prices(chain) do
-    if eip1559?(chain) do
-      get_eip1559_prices(chain)
-    else
-      get_legacy_prices(chain)
+    cond do
+      eip1559?(chain) -> get_eip1559_prices(chain)
+      known_legacy?(chain) -> get_legacy_prices(chain)
+      non_evm?(chain) -> get_non_evm_prices(chain)
+      true -> {:error, {:unsupported_chain, chain}}
     end
   end
 
@@ -212,22 +237,33 @@ defmodule Lux.Web3.GasOptimizer do
   @doc """
   Estimates the gas limit for a transaction.
 
-  Delegates to `Lux.Web3.GasOptimizer.Estimator`.
+  Delegates to `Lux.Web3.GasOptimizer.Estimator.estimate/2`.
 
   ## Parameters
 
     * `chain` - The target chain
     * `tx_params` - Transaction parameters map (to, from, data, value)
 
+  ## Returns
+
+    * `{:ok, {gas_limit, meta}}` - Gas estimate with metadata
+    * `{:error, reason}` - Estimation failed
+
   ## Examples
 
-      {:ok, gas_limit} = GasOptimizer.estimate_gas(:ethereum, %{
+      {:ok, {gas_limit, meta}} = GasOptimizer.estimate_gas(:ethereum, %{
         to: "0x...",
         from: "0x...",
         data: "0x..."
       })
+
+      gas_limit        # => 65_000 (with margin applied)
+      meta.source      # => :rpc or :cached
+      meta.anomaly      # => true or false
+      meta.raw_estimate # => original estimate before margin
   """
-  @spec estimate_gas(chain(), map()) :: {:ok, non_neg_integer()} | {:error, term()}
+  @spec estimate_gas(chain(), map()) ::
+          {:ok, {non_neg_integer(), Estimator.estimate_meta()}} | {:error, term()}
   defdelegate estimate_gas(chain, tx_params), to: Estimator
 
   @doc """
@@ -242,6 +278,149 @@ defmodule Lux.Web3.GasOptimizer do
   """
   @spec predict_optimal_time(chain()) :: {:ok, map()} | {:error, term()}
   defdelegate predict_optimal_time(chain), to: Predictor
+
+  @doc """
+  Replaces a stuck transaction with higher fees.
+
+  Creates a replacement transaction that keeps the same nonce but increases
+  gas fees by at least the network-required minimum (10%).
+
+  ## Returns
+
+    * `{:ok, replacement_tx}` - Replacement transaction with bumped fees
+    * `{:error, reason}` - Replacement failed
+  """
+  @spec replace_transaction(map(), atom(), keyword()) :: {:ok, map()} | {:error, term()}
+  def replace_transaction(tx, tx_type, opts \\ []) do
+    Replacement.bump_fees(tx, tx_type, opts)
+  end
+
+  @doc """
+  Fetches base fee history from recent blocks for EIP-1559 fee estimation.
+
+  Retrieves base fees from the last N blocks to support fee trend analysis
+  and more accurate estimation.
+
+  ## Returns
+
+    * `{:ok, [%{block_number: pos_integer(), base_fee: non_neg_integer(), timestamp: non_neg_integer()}]}`
+    * `{:error, {:not_eip1559, chain}}`
+  """
+  @spec base_fee_history(atom(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
+  def base_fee_history(chain, block_count \\ nil) do
+    unless eip1559?(chain) do
+      {:error, {:not_eip1559, chain}}
+    else
+      count = block_count || history_window()
+      url = rpc_url(chain)
+
+      with {:ok, %{"result" => hex_latest}} <- json_rpc(url, "eth_blockNumber", []) do
+        latest = parse_hex_int(hex_latest)
+
+        block_numbers =
+          (latest - count + 1)..latest
+          |> Enum.to_list()
+
+        base_fees =
+          block_numbers
+          |> Enum.map(fn num ->
+            case json_rpc(url, "eth_getBlockByNumber", [encode_hex_int(num), false]) do
+              {:ok, %{"result" => block}} when is_map(block) ->
+                %{
+                  block_number: num,
+                  base_fee: parse_hex_int(block["baseFeePerGas"] || "0x0"),
+                  timestamp: parse_hex_int(block["timestamp"] || "0x0")
+                }
+
+              _ ->
+                nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        {:ok, base_fees}
+      else
+        {:error, reason} ->
+          {:error, {:base_fee_history_failed, chain, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Estimates priority fee based on recent block history.
+
+  Analyzes miner reward data from recent blocks to estimate an appropriate
+  priority fee that will get included in the next block.
+  """
+  @spec estimate_priority_fee(atom()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def estimate_priority_fee(chain) do
+    unless eip1559?(chain) do
+      {:error, {:not_eip1559, chain}}
+    else
+      url = rpc_url(chain)
+      window = min(history_window(), 10)
+
+      with {:ok, %{"result" => hex_latest}} <- json_rpc(url, "eth_blockNumber", []) do
+        latest = parse_hex_int(hex_latest)
+
+        tips =
+          (latest - window + 1)..latest
+          |> Enum.map(fn num ->
+            case json_rpc(url, "eth_getBlockByNumber", [encode_hex_int(num), true]) do
+              {:ok, %{"result" => block}} when is_map(block) ->
+                extract_miner_tip(block)
+
+              _ ->
+                nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        case tips do
+          [] -> {:ok, default_priority_fee()}
+          _ ->
+            median = median_value(Enum.sort(tips))
+            {:ok, max(median, default_priority_fee())}
+        end
+      else
+        {:error, reason} ->
+          {:error, {:priority_fee_estimation_failed, chain, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Fetches gas prices from multiple sources and returns an averaged result.
+
+  Queries the configured RPC endpoint and optional public gas price oracles,
+  then averages the results for more reliable pricing.
+  """
+  @spec oracle_gas_prices(atom()) :: {:ok, map()} | {:error, term()}
+  def oracle_gas_prices(chain) do
+    FeeOracle.estimate(chain)
+  end
+
+  @doc """
+  Optimizes a transaction for gas efficiency.
+
+  Estimates gas and suggests optimal fee parameters.
+
+  ## Returns
+
+    * `{:ok, gas_estimate}` - A map with `gas_limit`, `meta`, and `suggestion`
+    * `{:error, reason}` - Optimization failed
+  """
+  @spec optimize(atom(), map()) :: {:ok, map()} | {:error, term()}
+  def optimize(chain, tx_params) do
+    with {:ok, {gas_limit, meta}} <- estimate_gas(chain, tx_params),
+         {:ok, suggestion} <- suggest_gas_price(chain, :medium) do
+      {:ok, %{
+        gas_limit: gas_limit,
+        meta: meta,
+        suggestion: suggestion
+      }}
+    end
+  end
 
   @doc """
   Gets the configured gas price margin.
@@ -285,13 +464,34 @@ defmodule Lux.Web3.GasOptimizer do
 
   # --- Private Functions ---
 
+  defp get_non_evm_prices(chain) do
+    Logger.info("Using non-EVM gas price estimation for #{chain}")
+
+    base_prices = %{
+      solana: 50_000,
+      near: 1_000_000_000,
+      sui: 750,
+      aptos: 100
+    }
+
+    gas_price = Map.get(base_prices, chain, 0)
+
+    if gas_price == 0 do
+      {:error, {:unsupported_non_evm, chain}}
+    else
+      {:ok, %{
+        gas_price: gas_price,
+        chain: chain
+      }}
+    end
+  end
+
   defp get_eip1559_prices(chain) do
     url = rpc_url(chain)
 
     with {:ok, %{"result" => hex_block}} <- json_rpc(url, "eth_getBlockByNumber", ["latest", false]),
          {:ok, block} <- decode_hex_block(hex_block) do
       base_fee = parse_hex_int(block["baseFeePerGas"] || "0x0")
-      # Use configured default or 1.5 Gwei
       priority_fee = default_priority_fee()
       max_fee = base_fee * 2 + priority_fee
 
@@ -354,4 +554,42 @@ defmodule Lux.Web3.GasOptimizer do
 
   defp parse_hex_int("0x" <> hex), do: String.to_integer(hex, 16)
   defp parse_hex_int(_), do: 0
+
+  defp encode_hex_int(n), do: "0x" <> Integer.to_string(n, 16)
+
+  defp extract_miner_tip(block) do
+    case block["transactions"] do
+      txs when is_list(txs) ->
+        txs
+        |> Enum.take(5)
+        |> Enum.map(fn
+          tx when is_map(tx) ->
+            ef = tx["effectiveGasPrice"]
+            if ef, do: parse_hex_int(ef), else: nil
+
+          _tx when is_binary(_tx) ->
+            nil
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> case do
+          [] -> nil
+          fees -> Enum.min(fees)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp median_value([]), do: 0
+  defp median_value(sorted) when is_list(sorted) do
+    len = length(sorted)
+    mid = div(len, 2)
+
+    if rem(len, 2) == 1 do
+      Enum.at(sorted, mid)
+    else
+      div(Enum.at(sorted, mid - 1) + Enum.at(sorted, mid), 2)
+    end
+  end
 end
