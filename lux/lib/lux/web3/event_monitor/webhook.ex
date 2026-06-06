@@ -271,6 +271,9 @@ defmodule Lux.Web3.EventMonitor.Webhook do
         }
         %{state | webhooks: Map.put(state.webhooks, webhook.id, updated_wh)}
 
+      {:error, :scheduled_retry} ->
+        state
+
       {:error, _reason} ->
         new_dl = [delivery | state.dead_letter] |> Enum.take(state.dead_letter_max)
         Logger.warning("Webhook delivery failed, added to dead letter queue: #{delivery.id} -> #{webhook.url}")
@@ -279,21 +282,41 @@ defmodule Lux.Web3.EventMonitor.Webhook do
   end
 
   defp attempt_delivery(delivery, webhook, payload, signature, max_retries) do
-    do_attempt(0, delivery, webhook, payload, signature, max_retries)
-  end
-
-  defp do_attempt(attempt, _delivery, webhook, payload, signature, max_retries) when attempt < max_retries do
     case do_http_post_with_payload(webhook.url, payload, signature, webhook.headers) do
       :ok -> :ok
-      {:error, _reason} ->
-        backoff = get_config(:retry_backoff_ms, 1_000) * :math.pow(2, attempt) |> round()
-        Process.sleep(backoff)
-        do_attempt(attempt + 1, _delivery, webhook, payload, signature, max_retries)
+      {:error, reason} ->
+        schedule_retry(delivery, webhook, payload, signature, max_retries, 0, reason)
     end
   end
 
-  defp do_attempt(_attempt, _delivery, _webhook, _payload, _signature, _max_retries) do
+  defp schedule_retry(delivery, webhook, payload, signature, max_retries, attempt, _reason) when attempt < max_retries do
+    backoff = get_config(:retry_backoff_ms, 1_000) * :math.pow(2, attempt) |> round()
+    Process.send_after(self(), {:webhook_retry, attempt + 1, delivery, webhook, payload, signature, max_retries}, backoff)
+    {:error, :scheduled_retry}
+  end
+
+  defp schedule_retry(_delivery, _webhook, _payload, _signature, _max_retries, attempt, _reason) do
     {:error, :max_retries_exceeded}
+  end
+
+  @impl true
+  def handle_info({:webhook_retry, attempt, delivery, webhook, payload, signature, max_retries}, state) do
+    case do_http_post_with_payload(webhook.url, payload, signature, webhook.headers) do
+      :ok ->
+        updated_wh = %{webhook | delivery_count: webhook.delivery_count + 1, last_delivery_at: DateTime.utc_now()}
+        {:noreply, %{state | webhooks: Map.put(state.webhooks, webhook.id, updated_wh)}}
+
+      {:error, reason} ->
+        case schedule_retry(delivery, webhook, payload, signature, max_retries, attempt, reason) do
+          {:error, :max_retries_exceeded} ->
+            new_dl = [delivery | state.dead_letter] |> Enum.take(state.dead_letter_max)
+            Logger.warning("Webhook delivery permanently failed after #{attempt + 1} attempts: #{delivery.id} -> #{webhook.url}")
+            {:noreply, %{state | dead_letter: new_dl}}
+
+          {:error, :scheduled_retry} ->
+            {:noreply, state}
+        end
+    end
   end
 
   defp do_http_post_with_payload(url, payload, signature, extra_headers) do

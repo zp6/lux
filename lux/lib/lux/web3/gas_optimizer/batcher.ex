@@ -269,10 +269,12 @@ defmodule Lux.Web3.GasOptimizer.Batcher do
   end
 
   # Batch: 21,000 base + ~36,000 for first + ~25,000 per additional ERC-20 transfer
-  defp estimate_batch_gas(transfers, :erc20_transfer) do
+  defp estimate_batch_gas(transfers, :erc20_transfer) when transfers != [] do
     count = length(transfers)
     21_000 + 36_000 + (count - 1) * 25_000
   end
+
+  defp estimate_batch_gas([], _type), do: 21_000
 
   # Batch: 21,000 base + ~25,000 per call (minimal savings for generic)
   defp estimate_batch_gas(transfers, :generic) do
