@@ -100,7 +100,7 @@ defmodule Lux.Web3.EventMonitor do
   defdelegate list_alerts, to: Alerts, as: :list_rules
 
   @spec process_alerts(map()) :: {:ok, [map()]}
-  defdelegate process_alerts(event), to: Alerts, as: :process_event
+  defdelegate process_event(event), to: Alerts, as: :process_event
 
   # Webhook delegation
 

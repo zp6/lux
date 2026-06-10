@@ -151,6 +151,9 @@ defmodule Lux.Web3.EventMonitor.Subscriber do
     chain = opts[:chain] || opts["chain"]
     contract_address = opts[:contract_address] || opts["contract_address"]
 
+    if is_nil(contract_address) or not is_binary(contract_address) do
+      {:reply, {:error, :invalid_contract_address}, state}
+    else
     unless valid_chain?(chain) do
       {:reply, {:error, {:invalid_chain, chain}}, state}
     else
@@ -385,6 +388,7 @@ defmodule Lux.Web3.EventMonitor.Subscriber do
   defp process_event(subscription, event) do
     Lux.Web3.EventMonitor.Storage.store_event(Map.put(event, :chain_id, subscription.chain_id))
     if subscription.callback, do: subscription.callback.(event)
+    Lux.Web3.EventMonitor.Alerts.process_event(event)
 
     :telemetry.execute(
       [:lux, :web3, :event_monitor, :event_received],
