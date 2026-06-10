@@ -593,3 +593,5 @@ defmodule Lux.Web3.GasOptimizer do
     end
   end
 end
+
+          priority_fee = min(priority_fee, max_fee)
